@@ -1,5 +1,5 @@
 {
-  "name": "@tharindumendis/tgcli",
+  "name": "@tharindumendis100/tgcli",
   "version": "2.0.9",
   "type": "module",
   "description": "Fork of tgcli — Telegram CLI + MCP server with native stdio transport for AI orchestrators",
