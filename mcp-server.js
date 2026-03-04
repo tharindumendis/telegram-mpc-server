@@ -11,22 +11,56 @@ import { loadConfig, validateConfig } from "./core/config.js";
 import { createServices } from "./core/services.js";
 import { resolveStoreDir } from "./core/store.js";
 
+import { fileURLToPath } from "url";
+const __isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+
 const SERVICE_STATE_FILE = "service-state.json";
 
-const storeDir = resolveStoreDir();
-const { config, path: configPath } = loadConfig(storeDir);
-const missingConfig = validateConfig(config ?? {});
-if (missingConfig.length > 0) {
-  console.error(`[startup] Missing tgcli configuration at ${configPath}. Run "tgcli auth".`);
-  process.exit(1);
+// These are only populated when running as main (HTTP server mode).
+// mcp-stdio.js provides its own services via createServerInstance().
+let _storeDir = null;
+let _config = null;
+let telegramClient = null;
+let messageSyncService = null;
+let mcpEnabled = false;
+let HOST = "127.0.0.1";
+let PORT = 8080;
+
+if (__isMain) {
+  _storeDir = resolveStoreDir();
+  const { config, path: configPath } = loadConfig(_storeDir);
+  const missingConfig = validateConfig(config ?? {});
+  if (missingConfig.length > 0) {
+    console.error(
+      `[startup] Missing tgcli configuration at ${configPath}. Run "tgcli auth".`,
+    );
+    process.exit(1);
+  }
+  _config = config;
+  const mcpConfig = config?.mcp ?? {};
+  mcpEnabled = Boolean(mcpConfig.enabled);
+  const resolvedHost =
+    mcpConfig.host ??
+    process.env.MCP_HOST ??
+    process.env.FASTMCP_HOST ??
+    "127.0.0.1";
+  const resolvedPort = Number(
+    mcpConfig.port ??
+      process.env.MCP_PORT ??
+      process.env.FASTMCP_PORT ??
+      "8080",
+  );
+  HOST = resolvedHost;
+  PORT =
+    Number.isFinite(resolvedPort) && resolvedPort > 0 ? resolvedPort : 8080;
+  const services = createServices({ storeDir: _storeDir, config: _config });
+  telegramClient = services.telegramClient;
+  messageSyncService = services.messageSyncService;
 }
-const mcpConfig = config?.mcp ?? {};
-const mcpEnabled = Boolean(mcpConfig.enabled);
-const resolvedHost = mcpConfig.host ?? process.env.MCP_HOST ?? process.env.FASTMCP_HOST ?? "127.0.0.1";
-const resolvedPort = Number(mcpConfig.port ?? process.env.MCP_PORT ?? process.env.FASTMCP_PORT ?? "8080");
-const HOST = resolvedHost;
-const PORT = Number.isFinite(resolvedPort) && resolvedPort > 0 ? resolvedPort : 8080;
-const { telegramClient, messageSyncService } = createServices({ storeDir, config });
+
+// storeDir is only used by HTTP-mode helper (writeServiceState)
+const storeDir = _storeDir;
 
 let telegramReady = false;
 let serviceState = null;
@@ -53,7 +87,9 @@ function writeServiceState(nextState) {
       "utf8",
     );
   } catch (error) {
-    console.error(`[startup] Failed to write service state: ${error?.message ?? error}`);
+    console.error(
+      `[startup] Failed to write service state: ${error?.message ?? error}`,
+    );
   }
 }
 
@@ -72,7 +108,7 @@ function updateServiceState(patch) {
 async function initializeTelegram() {
   if (telegramReady) return;
 
-  console.log("[startup] Initializing Telegram dialogs...");
+  console.error("[startup] Initializing Telegram dialogs...");
   const dialogsReady = await telegramClient.initializeDialogCache();
 
   if (!dialogsReady) {
@@ -80,7 +116,9 @@ async function initializeTelegram() {
   }
 
   const dialogCount = await messageSyncService.refreshChannelsFromDialogs();
-  console.log(`[startup] Seeded ${dialogCount} dialogs into archive registry.`);
+  console.error(
+    `[startup] Seeded ${dialogCount} dialogs into archive registry.`,
+  );
   messageSyncService.startRealtimeSync();
   messageSyncService.resumePendingJobs();
   telegramReady = true;
@@ -109,7 +147,12 @@ function closeSessionRecord(record, context) {
 }
 
 const listChannelsSchema = {
-  limit: z.number().int().positive().optional().describe("Maximum number of channels to return (default: 50)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of channels to return (default: 50)"),
 };
 
 const searchChannelsSchema = {
@@ -117,7 +160,12 @@ const searchChannelsSchema = {
     .string()
     .min(1)
     .describe("Keywords to search for in channel titles or usernames"),
-  limit: z.number().int().positive().optional().describe("Maximum number of results to return (default: 100)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of results to return (default: 100)"),
 };
 
 const setChannelTagsSchema = {
@@ -131,10 +179,7 @@ const setChannelTagsSchema = {
     .array(z.string().min(1))
     .min(1)
     .describe("List of tags to attach to the channel"),
-  source: z
-    .string()
-    .optional()
-    .describe("Tag source label (default: manual)"),
+  source: z.string().optional().describe("Tag source label (default: manual)"),
 };
 
 const listChannelTagsSchema = {
@@ -144,22 +189,18 @@ const listChannelTagsSchema = {
       z.string({ invalid_type_error: "channelId must be a string" }).min(1),
     ])
     .describe("Numeric channel ID or username"),
-  source: z
-    .string()
-    .optional()
-    .describe("Optional tag source to filter by"),
+  source: z.string().optional().describe("Optional tag source to filter by"),
 };
 
 const listTaggedChannelsSchema = {
-  tag: z
-    .string()
-    .min(1)
-    .describe("Tag label to look up"),
-  source: z
-    .string()
+  tag: z.string().min(1).describe("Tag label to look up"),
+  source: z.string().optional().describe("Optional tag source to filter by"),
+  limit: z
+    .number()
+    .int()
+    .positive()
     .optional()
-    .describe("Optional tag source to filter by"),
-  limit: z.number().int().positive().optional().describe("Maximum number of channels to return (default: 100)"),
+    .describe("Maximum number of channels to return (default: 100)"),
 };
 
 const refreshChannelMetadataSchema = {
@@ -172,7 +213,12 @@ const refreshChannelMetadataSchema = {
     )
     .optional()
     .describe("Optional list of channel IDs/usernames to refresh"),
-  limit: z.number().int().positive().optional().describe("Maximum number of channels to refresh (default: 20)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of channels to refresh (default: 20)"),
   force: z
     .boolean({ invalid_type_error: "force must be a boolean" })
     .optional()
@@ -202,11 +248,13 @@ const autoTagChannelsSchema = {
     )
     .optional()
     .describe("Optional list of channel IDs/usernames to tag"),
-  limit: z.number().int().positive().optional().describe("Maximum number of channels to tag (default: 50)"),
-  source: z
-    .string()
+  limit: z
+    .number()
+    .int()
+    .positive()
     .optional()
-    .describe("Tag source label (default: auto)"),
+    .describe("Maximum number of channels to tag (default: 50)"),
+  source: z.string().optional().describe("Tag source label (default: auto)"),
   refreshMetadata: z
     .boolean({ invalid_type_error: "refreshMetadata must be a boolean" })
     .optional()
@@ -240,8 +288,13 @@ const topicsListSchema = {
       z.number({ invalid_type_error: "channelId must be a number" }),
       z.string({ invalid_type_error: "channelId must be a string" }).min(1),
     ])
-  .describe("Numeric channel ID or username"),
-  limit: z.number().int().positive().optional().describe("Maximum number of topics to return (default: 100)"),
+    .describe("Numeric channel ID or username"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of topics to return (default: 100)"),
 };
 
 const topicsSearchSchema = {
@@ -255,7 +308,12 @@ const topicsSearchSchema = {
     .string({ invalid_type_error: "query must be a string" })
     .min(1)
     .describe("Search query for forum topic titles"),
-  limit: z.number().int().positive().optional().describe("Maximum number of topics to return (default: 100)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of topics to return (default: 100)"),
 };
 
 const messageSourceSchema = z
@@ -274,7 +332,9 @@ const userIdSchema = z.union([
 ]);
 
 const messagesListSchema = {
-  channelId: channelIdSchema.optional().describe("Optional numeric channel ID or username"),
+  channelId: channelIdSchema
+    .optional()
+    .describe("Optional numeric channel ID or username"),
   topicId: z
     .number({ invalid_type_error: "topicId must be a number" })
     .int()
@@ -292,7 +352,12 @@ const messagesListSchema = {
     .min(1)
     .optional()
     .describe("Latest ISO-8601 timestamp to include (optional)"),
-  limit: z.number().int().positive().optional().describe("Maximum number of messages to return (default: 50)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of messages to return (default: 50)"),
 };
 
 const messagesGetSchema = {
@@ -328,15 +393,24 @@ const messagesContextSchema = {
 };
 
 const messagesSearchSchema = {
-  query: z.string().optional().describe("Optional full-text query (archive) or search text (live)"),
-  regex: z.string().optional().describe("Optional regex filter for message text"),
+  query: z
+    .string()
+    .optional()
+    .describe("Optional full-text query (archive) or search text (live)"),
+  regex: z
+    .string()
+    .optional()
+    .describe("Optional regex filter for message text"),
   source: messageSourceSchema,
   channelIds: z
     .union([channelIdSchema, z.array(channelIdSchema).min(1)])
     .optional()
     .describe("Channel IDs or usernames to search (optional)"),
   channelId: channelIdSchema.optional().describe("Alias for channelIds"),
-  tags: z.array(z.string().min(1)).optional().describe("Channel tags to filter by (optional)"),
+  tags: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("Channel tags to filter by (optional)"),
   tag: z.string().optional().describe("Alias for tags"),
   topicId: z
     .number({ invalid_type_error: "topicId must be a number" })
@@ -354,11 +428,18 @@ const messagesSearchSchema = {
     .min(1)
     .optional()
     .describe("Latest ISO-8601 timestamp to include (optional)"),
-  limit: z.number().int().positive().optional().describe("Maximum number of matches to return (default: 100)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of matches to return (default: 100)"),
   caseInsensitive: z
     .boolean({ invalid_type_error: "caseInsensitive must be a boolean" })
     .optional()
-    .describe("Whether regex matching should be case-insensitive (default: true)"),
+    .describe(
+      "Whether regex matching should be case-insensitive (default: true)",
+    ),
 };
 
 const messagesSendSchema = {
@@ -388,7 +469,10 @@ const messagesSendFileSchema = {
     .min(1)
     .describe("Path to a local file to upload"),
   caption: z.string().optional().describe("Optional caption for the file"),
-  filename: z.string().optional().describe("Override file name shown in Telegram"),
+  filename: z
+    .string()
+    .optional()
+    .describe("Override file name shown in Telegram"),
   topicId: z
     .number({ invalid_type_error: "topicId must be a number" })
     .int()
@@ -416,7 +500,12 @@ const contactsSearchSchema = {
     .string({ invalid_type_error: "query must be a string" })
     .min(1)
     .describe("Search query for contacts"),
-  limit: z.number().int().positive().optional().describe("Maximum number of contacts to return (default: 50)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of contacts to return (default: 50)"),
 };
 
 const contactsGetSchema = {
@@ -453,8 +542,16 @@ const contactsNotesSetSchema = {
 };
 
 const groupsListSchema = {
-  query: z.string().optional().describe("Optional search query for group titles"),
-  limit: z.number().int().positive().optional().describe("Maximum number of groups to return (default: 100)"),
+  query: z
+    .string()
+    .optional()
+    .describe("Optional search query for group titles"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of groups to return (default: 100)"),
 };
 
 const groupsInfoSchema = {
@@ -522,7 +619,9 @@ function resolveChannelIds(channelIds, channelId) {
   if (channelId) {
     resolved.push(channelId);
   }
-  const filtered = resolved.filter((id) => id !== null && id !== undefined && String(id).trim() !== "");
+  const filtered = resolved.filter(
+    (id) => id !== null && id !== undefined && String(id).trim() !== "",
+  );
   return filtered.length ? filtered : null;
 }
 
@@ -557,7 +656,9 @@ function filterLiveMessagesByDate(messages, fromDate, toDate) {
 }
 
 function formatLiveMessage(message, context) {
-  const dateIso = message.date ? new Date(message.date * 1000).toISOString() : null;
+  const dateIso = message.date
+    ? new Date(message.date * 1000).toISOString()
+    : null;
   return {
     channelId: context.channelId ?? message.peer_id ?? null,
     peerTitle: context.peerTitle ?? null,
@@ -568,7 +669,8 @@ function formatLiveMessage(message, context) {
     fromUsername: message.from_username ?? null,
     fromDisplayName: message.from_display_name ?? null,
     fromPeerType: message.from_peer_type ?? null,
-    fromIsBot: typeof message.from_is_bot === "boolean" ? message.from_is_bot : null,
+    fromIsBot:
+      typeof message.from_is_bot === "boolean" ? message.from_is_bot : null,
     text: message.text ?? message.message ?? "",
     media: message.media ?? null,
     topicId: message.topic_id ?? null,
@@ -588,8 +690,10 @@ function formatInviteLink(link) {
     endDate: link.endDate ? link.endDate.toISOString() : null,
     usageLimit: typeof link.usageLimit === "number" ? link.usageLimit : null,
     usage: typeof link.usage === "number" ? link.usage : null,
-    approvalNeeded: typeof link.approvalNeeded === "boolean" ? link.approvalNeeded : null,
-    pendingApprovals: typeof link.pendingApprovals === "number" ? link.pendingApprovals : null,
+    approvalNeeded:
+      typeof link.approvalNeeded === "boolean" ? link.approvalNeeded : null,
+    pendingApprovals:
+      typeof link.pendingApprovals === "number" ? link.pendingApprovals : null,
   };
 }
 
@@ -615,7 +719,11 @@ function mergeMessageSets(sets, limit) {
   return limit && limit > 0 ? merged.slice(0, limit) : merged;
 }
 
-function createServerInstance() {
+export function createServerInstance(injected = {}) {
+  // Allow stdio callers to inject their own service instances.
+  // Falls back to the module-level instances used by the HTTP server.
+  const tc = injected.telegramClient ?? telegramClient;
+  const mss = injected.messageSyncService ?? messageSyncService;
   const server = new McpServer({
     name: "example-mcp-server",
     version: "1.0.0",
@@ -626,8 +734,8 @@ function createServerInstance() {
     "Lists available Telegram dialogs for the authenticated account.",
     listChannelsSchema,
     async ({ limit }) => {
-      await telegramClient.ensureLogin();
-      const dialogs = await telegramClient.listDialogs(limit ?? 50);
+      await tc.ensureLogin();
+      const dialogs = await tc.listDialogs(limit ?? 50);
 
       return {
         content: [
@@ -645,8 +753,8 @@ function createServerInstance() {
     "Searches dialogs by title or username.",
     searchChannelsSchema,
     async ({ keywords, limit }) => {
-      await telegramClient.ensureLogin();
-      const matches = await telegramClient.searchDialogs(keywords, limit ?? 100);
+      await tc.ensureLogin();
+      const matches = await tc.searchDialogs(keywords, limit ?? 100);
 
       return {
         content: [
@@ -664,7 +772,7 @@ function createServerInstance() {
     "Lists dialogs tracked in the local archive registry.",
     {},
     async () => {
-      const channels = messageSyncService.listActiveChannels();
+      const channels = mss.listActiveChannels();
 
       return {
         content: [
@@ -682,7 +790,9 @@ function createServerInstance() {
     "Assign tags to a channel for later cross-channel search.",
     setChannelTagsSchema,
     async ({ channelId, tags, source }) => {
-      const finalTags = messageSyncService.setChannelTags(channelId, tags, { source });
+      const finalTags = mss.setChannelTags(channelId, tags, {
+        source,
+      });
 
       return {
         content: [
@@ -700,7 +810,7 @@ function createServerInstance() {
     "List tags attached to a channel.",
     listChannelTagsSchema,
     async ({ channelId, source }) => {
-      const tags = messageSyncService.listChannelTags(channelId, { source });
+      const tags = mss.listChannelTags(channelId, { source });
 
       return {
         content: [
@@ -718,7 +828,10 @@ function createServerInstance() {
     "List channels that carry a specific tag.",
     listTaggedChannelsSchema,
     async ({ tag, source, limit }) => {
-      const channels = messageSyncService.listTaggedChannels(tag, { source, limit });
+      const channels = mss.listTaggedChannels(tag, {
+        source,
+        limit,
+      });
 
       return {
         content: [
@@ -736,8 +849,8 @@ function createServerInstance() {
     "Fetches and caches extended metadata for channels.",
     refreshChannelMetadataSchema,
     async ({ channelIds, limit, force, onlyMissing }) => {
-      await telegramClient.ensureLogin();
-      const results = await messageSyncService.refreshChannelMetadata({
+      await tc.ensureLogin();
+      const results = await mss.refreshChannelMetadata({
         channelIds,
         limit,
         force,
@@ -760,7 +873,7 @@ function createServerInstance() {
     "Returns cached metadata for a channel.",
     getChannelMetadataSchema,
     async ({ channelId }) => {
-      const metadata = messageSyncService.getChannelMetadata(channelId);
+      const metadata = mss.getChannelMetadata(channelId);
 
       return {
         content: [
@@ -778,8 +891,8 @@ function createServerInstance() {
     "Auto-tags channels based on title, username, and cached metadata.",
     autoTagChannelsSchema,
     async ({ channelIds, limit, source, refreshMetadata }) => {
-      await telegramClient.ensureLogin();
-      const results = await messageSyncService.autoTagChannels({
+      await tc.ensureLogin();
+      const results = await mss.autoTagChannels({
         channelIds,
         limit,
         source,
@@ -802,9 +915,11 @@ function createServerInstance() {
     "Lists forum topics for a supergroup.",
     topicsListSchema,
     async ({ channelId, limit }) => {
-      await telegramClient.ensureLogin();
-      const topics = await telegramClient.listForumTopics(channelId, { limit: limit ?? 100 });
-      messageSyncService.upsertTopics(channelId, topics);
+      await tc.ensureLogin();
+      const topics = await tc.listForumTopics(channelId, {
+        limit: limit ?? 100,
+      });
+      mss.upsertTopics(channelId, topics);
 
       const formatted = topics.map((topic) => {
         let lastMessage = null;
@@ -854,9 +969,12 @@ function createServerInstance() {
     "Searches forum topics by title.",
     topicsSearchSchema,
     async ({ channelId, query, limit }) => {
-      await telegramClient.ensureLogin();
-      const topics = await telegramClient.listForumTopics(channelId, { query, limit: limit ?? 100 });
-      messageSyncService.upsertTopics(channelId, topics);
+      await tc.ensureLogin();
+      const topics = await tc.listForumTopics(channelId, {
+        query,
+        limit: limit ?? 100,
+      });
+      mss.upsertTopics(channelId, topics);
 
       const formatted = topics.map((topic) => ({
         id: topic.id,
@@ -896,53 +1014,71 @@ function createServerInstance() {
       const sets = [];
 
       if (resolvedSource === "archive" || resolvedSource === "both") {
-        const archived = messageSyncService.listArchivedMessages({
+        const archived = mss.listArchivedMessages({
           channelIds: channelId ? [channelId] : null,
           topicId,
           fromDate,
           toDate,
           limit: finalLimit,
         });
-        sets.push(archived.map((message) => ({ ...message, source: "archive" })));
+        sets.push(
+          archived.map((message) => ({ ...message, source: "archive" })),
+        );
       }
 
       if (resolvedSource === "live" || resolvedSource === "both") {
         if (!channelId) {
           throw new Error("channelId is required for live source.");
         }
-        await telegramClient.ensureLogin();
-        const channelMeta = messageSyncService.getChannelMetadata(channelId);
+        await tc.ensureLogin();
+        const channelMeta = mss.getChannelMetadata(channelId);
         let peerTitle = channelMeta?.peerTitle ?? null;
         let username = channelMeta?.username ?? null;
         let peerId = channelMeta?.channelId ?? String(channelId);
         let liveMessages = [];
 
         if (topicId) {
-          const results = await telegramClient.getTopicMessages(channelId, topicId, finalLimit);
+          const results = await tc.getTopicMessages(
+            channelId,
+            topicId,
+            finalLimit,
+          );
           liveMessages = results.messages;
           if (!peerTitle || !username) {
-            const meta = await telegramClient.getPeerMetadata(channelId);
+            const meta = await tc.getPeerMetadata(channelId);
             peerTitle = peerTitle ?? meta?.peerTitle ?? null;
             username = username ?? meta?.username ?? null;
           }
         } else {
-          const results = await telegramClient.getMessagesByChannelId(channelId, finalLimit);
+          const results = await tc.getMessagesByChannelId(
+            channelId,
+            finalLimit,
+          );
           liveMessages = results.messages;
           peerTitle = peerTitle ?? results.peerTitle ?? null;
           peerId = results.peerId ?? peerId;
         }
 
-        const filtered = filterLiveMessagesByDate(liveMessages, fromDate, toDate);
+        const filtered = filterLiveMessagesByDate(
+          liveMessages,
+          fromDate,
+          toDate,
+        );
         const formatted = filtered.map((message) => ({
-          ...formatLiveMessage(message, { channelId: peerId, peerTitle, username }),
+          ...formatLiveMessage(message, {
+            channelId: peerId,
+            peerTitle,
+            username,
+          }),
           source: "live",
         }));
         sets.push(formatted);
       }
 
-      const messages = resolvedSource === "both"
-        ? mergeMessageSets(sets, finalLimit)
-        : (sets[0] ?? []);
+      const messages =
+        resolvedSource === "both"
+          ? mergeMessageSets(sets, finalLimit)
+          : (sets[0] ?? []);
 
       return {
         content: [
@@ -969,31 +1105,41 @@ function createServerInstance() {
     messagesGetSchema,
     async ({ channelId, messageId, source }) => {
       const resolvedSource = resolveSource(source);
-      const channelMeta = messageSyncService.getChannelMetadata(channelId);
+      const channelMeta = mss.getChannelMetadata(channelId);
       let message = null;
       let resolvedFrom = null;
 
       if (resolvedSource === "live" || resolvedSource === "both") {
-        await telegramClient.ensureLogin();
-        const live = await telegramClient.getMessageById(channelId, messageId);
+        await tc.ensureLogin();
+        const live = await tc.getMessageById(channelId, messageId);
         if (live) {
           let peerTitle = channelMeta?.peerTitle ?? null;
           let username = channelMeta?.username ?? null;
           if (!peerTitle || !username) {
-            const meta = await telegramClient.getPeerMetadata(channelId);
+            const meta = await tc.getPeerMetadata(channelId);
             peerTitle = peerTitle ?? meta?.peerTitle ?? null;
             username = username ?? meta?.username ?? null;
           }
           message = {
-            ...formatLiveMessage(live, { channelId: String(channelId), peerTitle, username }),
+            ...formatLiveMessage(live, {
+              channelId: String(channelId),
+              peerTitle,
+              username,
+            }),
             source: "live",
           };
           resolvedFrom = "live";
         }
       }
 
-      if (!message && (resolvedSource === "archive" || resolvedSource === "both")) {
-        const archived = messageSyncService.getArchivedMessage({ channelId, messageId });
+      if (
+        !message &&
+        (resolvedSource === "archive" || resolvedSource === "both")
+      ) {
+        const archived = mss.getArchivedMessage({
+          channelId,
+          messageId,
+        });
         if (archived) {
           message = { ...archived, source: "archive" };
           resolvedFrom = "archive";
@@ -1030,13 +1176,13 @@ function createServerInstance() {
       const resolvedSource = resolveSource(source);
       const safeBefore = Number.isFinite(before) ? before : 20;
       const safeAfter = Number.isFinite(after) ? after : 20;
-      const channelMeta = messageSyncService.getChannelMetadata(channelId);
+      const channelMeta = mss.getChannelMetadata(channelId);
       let context = null;
       let resolvedFrom = null;
 
       if (resolvedSource === "live" || resolvedSource === "both") {
-        await telegramClient.ensureLogin();
-        const liveContext = await telegramClient.getMessageContext(channelId, messageId, {
+        await tc.ensureLogin();
+        const liveContext = await tc.getMessageContext(channelId, messageId, {
           before: safeBefore,
           after: safeAfter,
         });
@@ -1044,21 +1190,33 @@ function createServerInstance() {
           let peerTitle = channelMeta?.peerTitle ?? null;
           let username = channelMeta?.username ?? null;
           if (!peerTitle || !username) {
-            const meta = await telegramClient.getPeerMetadata(channelId);
+            const meta = await tc.getPeerMetadata(channelId);
             peerTitle = peerTitle ?? meta?.peerTitle ?? null;
             username = username ?? meta?.username ?? null;
           }
           context = {
             target: {
-              ...formatLiveMessage(liveContext.target, { channelId: String(channelId), peerTitle, username }),
+              ...formatLiveMessage(liveContext.target, {
+                channelId: String(channelId),
+                peerTitle,
+                username,
+              }),
               source: "live",
             },
             before: liveContext.before.map((message) => ({
-              ...formatLiveMessage(message, { channelId: String(channelId), peerTitle, username }),
+              ...formatLiveMessage(message, {
+                channelId: String(channelId),
+                peerTitle,
+                username,
+              }),
               source: "live",
             })),
             after: liveContext.after.map((message) => ({
-              ...formatLiveMessage(message, { channelId: String(channelId), peerTitle, username }),
+              ...formatLiveMessage(message, {
+                channelId: String(channelId),
+                peerTitle,
+                username,
+              }),
               source: "live",
             })),
           };
@@ -1066,8 +1224,11 @@ function createServerInstance() {
         }
       }
 
-      if (!context && (resolvedSource === "archive" || resolvedSource === "both")) {
-        const archiveContext = messageSyncService.getArchivedMessageContext({
+      if (
+        !context &&
+        (resolvedSource === "archive" || resolvedSource === "both")
+      ) {
+        const archiveContext = mss.getArchivedMessageContext({
           channelId,
           messageId,
           before: safeBefore,
@@ -1076,8 +1237,14 @@ function createServerInstance() {
         if (archiveContext.target) {
           context = {
             target: { ...archiveContext.target, source: "archive" },
-            before: archiveContext.before.map((message) => ({ ...message, source: "archive" })),
-            after: archiveContext.after.map((message) => ({ ...message, source: "archive" })),
+            before: archiveContext.before.map((message) => ({
+              ...message,
+              source: "archive",
+            })),
+            after: archiveContext.after.map((message) => ({
+              ...message,
+              source: "archive",
+            })),
           };
           resolvedFrom = "archive";
         }
@@ -1125,7 +1292,7 @@ function createServerInstance() {
     }) => {
       const resolvedSource = resolveSource(source);
       const finalLimit = limit ?? 100;
-      const resolvedTags = Array.isArray(tags) ? tags : (tag ? [tag] : null);
+      const resolvedTags = Array.isArray(tags) ? tags : tag ? [tag] : null;
       const resolvedChannelIds = resolveChannelIds(channelIds, channelId);
 
       if (!query && !regex && (!resolvedTags || resolvedTags.length === 0)) {
@@ -1135,7 +1302,7 @@ function createServerInstance() {
       const sets = [];
 
       if (resolvedSource === "archive" || resolvedSource === "both") {
-        const archived = messageSyncService.searchArchiveMessages({
+        const archived = mss.searchArchiveMessages({
           query,
           regex,
           tags: resolvedTags,
@@ -1146,15 +1313,22 @@ function createServerInstance() {
           limit: finalLimit,
           caseInsensitive,
         });
-        sets.push(archived.map((message) => ({ ...message, source: "archive" })));
+        sets.push(
+          archived.map((message) => ({ ...message, source: "archive" })),
+        );
       }
 
       if (resolvedSource === "live" || resolvedSource === "both") {
         let liveChannelIds = resolvedChannelIds;
-        if ((!liveChannelIds || liveChannelIds.length === 0) && resolvedTags?.length) {
+        if (
+          (!liveChannelIds || liveChannelIds.length === 0) &&
+          resolvedTags?.length
+        ) {
           const tagged = new Map();
           for (const tagValue of resolvedTags) {
-            const channels = messageSyncService.listTaggedChannels(tagValue, { limit: 200 });
+            const channels = mss.listTaggedChannels(tagValue, {
+              limit: 200,
+            });
             for (const channel of channels) {
               tagged.set(channel.channelId, channel);
             }
@@ -1175,17 +1349,17 @@ function createServerInstance() {
           }
         }
 
-        await telegramClient.ensureLogin();
+        await tc.ensureLogin();
         const liveResults = [];
 
         for (const id of liveChannelIds) {
-          const channelMeta = messageSyncService.getChannelMetadata(id);
+          const channelMeta = mss.getChannelMetadata(id);
           let peerTitle = channelMeta?.peerTitle ?? null;
           let username = channelMeta?.username ?? null;
           let liveMessages = [];
 
           if (query) {
-            const results = await telegramClient.searchChannelMessages(id, {
+            const results = await tc.searchChannelMessages(id, {
               query,
               limit: finalLimit,
               topicId,
@@ -1193,21 +1367,25 @@ function createServerInstance() {
             liveMessages = results.messages;
             peerTitle = peerTitle ?? results.peerTitle ?? null;
           } else if (topicId) {
-            const results = await telegramClient.getTopicMessages(id, topicId, finalLimit);
+            const results = await tc.getTopicMessages(id, topicId, finalLimit);
             liveMessages = results.messages;
           } else {
-            const results = await telegramClient.getMessagesByChannelId(id, finalLimit);
+            const results = await tc.getMessagesByChannelId(id, finalLimit);
             liveMessages = results.messages;
             peerTitle = peerTitle ?? results.peerTitle ?? null;
           }
 
           if (!peerTitle || !username) {
-            const meta = await telegramClient.getPeerMetadata(id);
+            const meta = await tc.getPeerMetadata(id);
             peerTitle = peerTitle ?? meta?.peerTitle ?? null;
             username = username ?? meta?.username ?? null;
           }
 
-          let filtered = filterLiveMessagesByDate(liveMessages, fromDate, toDate);
+          let filtered = filterLiveMessagesByDate(
+            liveMessages,
+            fromDate,
+            toDate,
+          );
           if (liveRegex) {
             filtered = filtered.filter((message) =>
               liveRegex.test(message.text ?? message.message ?? ""),
@@ -1215,7 +1393,11 @@ function createServerInstance() {
           }
 
           const formatted = filtered.map((message) => ({
-            ...formatLiveMessage(message, { channelId: String(id), peerTitle, username }),
+            ...formatLiveMessage(message, {
+              channelId: String(id),
+              peerTitle,
+              username,
+            }),
             source: "live",
           }));
           liveResults.push(...formatted);
@@ -1224,9 +1406,10 @@ function createServerInstance() {
         sets.push(liveResults);
       }
 
-      const messages = resolvedSource === "both"
-        ? mergeMessageSets(sets, finalLimit)
-        : (sets[0] ?? []);
+      const messages =
+        resolvedSource === "both"
+          ? mergeMessageSets(sets, finalLimit)
+          : (sets[0] ?? []);
 
       return {
         content: [
@@ -1252,8 +1435,8 @@ function createServerInstance() {
     "Sends a text message to a channel or chat.",
     messagesSendSchema,
     async ({ channelId, text, topicId, replyToMessageId }) => {
-      await telegramClient.ensureLogin();
-      const result = await telegramClient.sendTextMessage(channelId, text, {
+      await tc.ensureLogin();
+      const result = await tc.sendTextMessage(channelId, text, {
         topicId,
         replyToMessageId,
       });
@@ -1274,8 +1457,8 @@ function createServerInstance() {
     "Sends a file with an optional caption.",
     messagesSendFileSchema,
     async ({ channelId, filePath, caption, filename, topicId }) => {
-      await telegramClient.ensureLogin();
-      const result = await telegramClient.sendFileMessage(channelId, filePath, {
+      await tc.ensureLogin();
+      const result = await tc.sendFileMessage(channelId, filePath, {
         caption,
         filename,
         topicId,
@@ -1297,8 +1480,8 @@ function createServerInstance() {
     "Downloads media from a message to a local file.",
     mediaDownloadSchema,
     async ({ channelId, messageId, outputPath }) => {
-      await telegramClient.ensureLogin();
-      const result = await telegramClient.downloadMessageMedia(channelId, messageId, {
+      await tc.ensureLogin();
+      const result = await tc.downloadMessageMedia(channelId, messageId, {
         outputPath,
       });
 
@@ -1318,9 +1501,9 @@ function createServerInstance() {
     "Searches contacts/users with aliases, tags, and notes.",
     contactsSearchSchema,
     async ({ query, limit }) => {
-      await telegramClient.ensureLogin();
-      await messageSyncService.refreshContacts();
-      const contacts = messageSyncService.searchContacts(query, { limit });
+      await tc.ensureLogin();
+      await mss.refreshContacts();
+      const contacts = mss.searchContacts(query, { limit });
 
       return {
         content: [
@@ -1338,11 +1521,11 @@ function createServerInstance() {
     "Returns a contact profile from the local store.",
     contactsGetSchema,
     async ({ userId }) => {
-      let contact = messageSyncService.getContact(userId);
+      let contact = mss.getContact(userId);
       if (!contact) {
-        await telegramClient.ensureLogin();
-        await messageSyncService.refreshContacts();
-        contact = messageSyncService.getContact(userId);
+        await tc.ensureLogin();
+        await mss.refreshContacts();
+        contact = mss.getContact(userId);
       }
 
       if (!contact) {
@@ -1365,7 +1548,7 @@ function createServerInstance() {
     "Sets an alias for a contact.",
     contactsAliasSetSchema,
     async ({ userId, alias }) => {
-      const value = messageSyncService.setContactAlias(userId, alias);
+      const value = mss.setContactAlias(userId, alias);
 
       return {
         content: [
@@ -1383,7 +1566,7 @@ function createServerInstance() {
     "Removes alias for a contact.",
     contactsAliasRemoveSchema,
     async ({ userId }) => {
-      messageSyncService.removeContactAlias(userId);
+      mss.removeContactAlias(userId);
 
       return {
         content: [
@@ -1401,7 +1584,7 @@ function createServerInstance() {
     "Adds tags to a contact.",
     contactsTagsAddSchema,
     async ({ userId, tags }) => {
-      const updated = messageSyncService.addContactTags(userId, tags);
+      const updated = mss.addContactTags(userId, tags);
 
       return {
         content: [
@@ -1419,7 +1602,7 @@ function createServerInstance() {
     "Removes tags from a contact.",
     contactsTagsRemoveSchema,
     async ({ userId, tags }) => {
-      const updated = messageSyncService.removeContactTags(userId, tags);
+      const updated = mss.removeContactTags(userId, tags);
 
       return {
         content: [
@@ -1437,7 +1620,7 @@ function createServerInstance() {
     "Sets notes for a contact.",
     contactsNotesSetSchema,
     async ({ userId, notes }) => {
-      const updated = messageSyncService.setContactNotes(userId, notes);
+      const updated = mss.setContactNotes(userId, notes);
 
       return {
         content: [
@@ -1455,8 +1638,8 @@ function createServerInstance() {
     "Lists group chats and supergroups.",
     groupsListSchema,
     async ({ query, limit }) => {
-      await telegramClient.ensureLogin();
-      const groups = await telegramClient.listGroups({ query, limit });
+      await tc.ensureLogin();
+      const groups = await tc.listGroups({ query, limit });
 
       return {
         content: [
@@ -1474,8 +1657,8 @@ function createServerInstance() {
     "Fetches group information and metadata.",
     groupsInfoSchema,
     async ({ channelId }) => {
-      await telegramClient.ensureLogin();
-      const info = await telegramClient.getGroupInfo(channelId);
+      await tc.ensureLogin();
+      const info = await tc.getGroupInfo(channelId);
 
       return {
         content: [
@@ -1493,8 +1676,8 @@ function createServerInstance() {
     "Renames a group chat or supergroup.",
     groupsRenameSchema,
     async ({ channelId, name }) => {
-      await telegramClient.ensureLogin();
-      await telegramClient.renameGroup(channelId, name);
+      await tc.ensureLogin();
+      await tc.renameGroup(channelId, name);
 
       return {
         content: [
@@ -1512,8 +1695,8 @@ function createServerInstance() {
     "Adds members to a group.",
     groupsMembersAddSchema,
     async ({ channelId, userIds }) => {
-      await telegramClient.ensureLogin();
-      const failed = await telegramClient.addGroupMembers(channelId, userIds);
+      await tc.ensureLogin();
+      const failed = await tc.addGroupMembers(channelId, userIds);
 
       return {
         content: [
@@ -1531,8 +1714,8 @@ function createServerInstance() {
     "Removes members from a group.",
     groupsMembersRemoveSchema,
     async ({ channelId, userIds }) => {
-      await telegramClient.ensureLogin();
-      const result = await telegramClient.removeGroupMembers(channelId, userIds);
+      await tc.ensureLogin();
+      const result = await tc.removeGroupMembers(channelId, userIds);
 
       return {
         content: [
@@ -1550,8 +1733,8 @@ function createServerInstance() {
     "Gets the primary invite link for a group.",
     groupsInviteLinkGetSchema,
     async ({ channelId }) => {
-      await telegramClient.ensureLogin();
-      const link = await telegramClient.getGroupInviteLink(channelId);
+      await tc.ensureLogin();
+      const link = await tc.getGroupInviteLink(channelId);
 
       return {
         content: [
@@ -1569,9 +1752,9 @@ function createServerInstance() {
     "Revokes the primary invite link for a group.",
     groupsInviteLinkRevokeSchema,
     async ({ channelId }) => {
-      await telegramClient.ensureLogin();
-      const existing = await telegramClient.getGroupInviteLink(channelId);
-      const link = await telegramClient.revokeGroupInviteLink(channelId, existing);
+      await tc.ensureLogin();
+      const existing = await tc.getGroupInviteLink(channelId);
+      const link = await tc.revokeGroupInviteLink(channelId, existing);
 
       return {
         content: [
@@ -1589,8 +1772,8 @@ function createServerInstance() {
     "Joins a group using an invite link or code.",
     groupsJoinSchema,
     async ({ invite }) => {
-      await telegramClient.ensureLogin();
-      const chat = await telegramClient.joinGroup(invite);
+      await tc.ensureLogin();
+      const chat = await tc.joinGroup(invite);
 
       return {
         content: [
@@ -1601,7 +1784,8 @@ function createServerInstance() {
                 id: chat.id?.toString?.() ?? null,
                 title: chat.displayName || chat.title || "Unknown",
                 username: chat.username ?? null,
-                chatType: typeof chat.chatType === "string" ? chat.chatType : null,
+                chatType:
+                  typeof chat.chatType === "string" ? chat.chatType : null,
               },
               null,
               2,
@@ -1617,8 +1801,8 @@ function createServerInstance() {
     "Leaves a group chat or channel.",
     groupsLeaveSchema,
     async ({ channelId }) => {
-      await telegramClient.ensureLogin();
-      await telegramClient.leaveGroup(channelId);
+      await tc.ensureLogin();
+      await tc.leaveGroup(channelId);
 
       return {
         content: [
@@ -1636,9 +1820,9 @@ function createServerInstance() {
     "Schedules a background job to archive channel messages locally.",
     scheduleMessageSyncSchema,
     async ({ channelId, depth, minDate }) => {
-      await telegramClient.ensureLogin();
-      const job = messageSyncService.addJob(channelId, { depth, minDate });
-      void messageSyncService.processQueue();
+      await tc.ensureLogin();
+      const job = mss.addJob(channelId, { depth, minDate });
+      void mss.processQueue();
 
       return {
         content: [
@@ -1663,7 +1847,7 @@ function createServerInstance() {
         .describe("Numeric channel ID or username"),
     },
     async ({ channelId }) => {
-      const stats = messageSyncService.getMessageStats(channelId);
+      const stats = mss.getMessageStats(channelId);
 
       return {
         content: [
@@ -1681,7 +1865,7 @@ function createServerInstance() {
     "Lists tracked message sync jobs and their current status.",
     {},
     async () => {
-      const jobs = messageSyncService.listJobs();
+      const jobs = mss.listJobs();
 
       return {
         content: [
@@ -1878,137 +2062,156 @@ async function handleSessionRequest(req, res) {
 // TODO: MCP server should participate in the store locking protocol.
 // Currently it opens the SQLite DB and Telegram session without any lock,
 // which can cause conflicts with concurrent CLI commands.
-await initializeTelegram().catch((error) => {
-  console.error(`[startup] Telegram initialization failed: ${error?.message ?? error}`);
-  process.exit(1);
-});
 
-serviceState = {
-  pid: process.pid,
-  version: readVersion(),
-  manager: process.env.TGCLI_SERVICE_MANAGER ?? "manual",
-  startedAt: new Date().toISOString(),
-  mcpEnabled,
-  mcpHost: mcpEnabled ? HOST : null,
-  mcpPort: mcpEnabled ? PORT : null,
-};
-writeServiceState(serviceState);
+if (__isMain) {
+  await initializeTelegram().catch((error) => {
+    console.error(
+      `[startup] Telegram initialization failed: ${error?.message ?? error}`,
+    );
+    process.exit(1);
+  });
 
-let httpServer = null;
-if (mcpEnabled) {
-  httpServer = http.createServer(async (req, res) => {
+  serviceState = {
+    pid: process.pid,
+    version: readVersion(),
+    manager: process.env.TGCLI_SERVICE_MANAGER ?? "manual",
+    startedAt: new Date().toISOString(),
+    mcpEnabled,
+    mcpHost: mcpEnabled ? HOST : null,
+    mcpPort: mcpEnabled ? PORT : null,
+  };
+  writeServiceState(serviceState);
+
+  let httpServer = null;
+  if (mcpEnabled) {
+    httpServer = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(
+          req.url ?? "",
+          `http://${req.headers.host ?? `${HOST}:${PORT}`}`,
+        );
+
+        if (req.method === "OPTIONS") {
+          res.writeHead(204).end();
+          return;
+        }
+
+        if (req.method === "GET" && url.pathname === "/health") {
+          res
+            .writeHead(200, { "Content-Type": "application/json" })
+            .end(JSON.stringify({ status: "ok" }));
+          return;
+        }
+
+        if (req.method === "POST" && url.pathname === "/mcp") {
+          await handlePost(req, res);
+          return;
+        }
+
+        if (
+          (req.method === "GET" || req.method === "DELETE") &&
+          url.pathname === "/mcp"
+        ) {
+          await handleSessionRequest(req, res);
+          return;
+        }
+
+        if (req.method === "POST") {
+          res.writeHead(404, { "Content-Type": "application/json" }).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32601,
+                message: "Endpoint not found",
+              },
+              id: null,
+            }),
+          );
+          return;
+        }
+
+        res.writeHead(405, { Allow: "GET, POST, DELETE" }).end();
+      } catch (error) {
+        console.error(`[http] unexpected error: ${error?.message ?? error}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" }).end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32603,
+                message: "Internal server error",
+              },
+              id: null,
+            }),
+          );
+        }
+      }
+    });
+
+    httpServer.listen(PORT, HOST, () => {
+      console.error(
+        `[startup] MCP HTTP server listening on http://${HOST}:${PORT}/mcp`,
+      );
+    });
+
+    httpServer.on("error", (error) => {
+      console.error(`[http] server error: ${error.message}`);
+    });
+  } else {
+    console.error("[startup] MCP disabled; running sync-only service.");
+  }
+
+  async function shutdown() {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    console.error(
+      "[shutdown] received termination signal, closing resources...",
+    );
+    const closeTasks = [];
+    for (const record of sessions.values()) {
+      const task = closeSessionRecord(record, "shutdown");
+      if (task) {
+        closeTasks.push(task);
+      }
+    }
+    if (closeTasks.length) {
+      await Promise.allSettled(closeTasks);
+    }
+    if (httpServer) {
+      httpServer.closeAllConnections?.();
+      httpServer.close(() => {
+        console.error("[shutdown] HTTP server closed");
+      });
+    }
+
     try {
-      const url = new URL(req.url ?? "", `http://${req.headers.host ?? `${HOST}:${PORT}`}`);
-
-      if (req.method === "OPTIONS") {
-        res.writeHead(204).end();
-        return;
-      }
-
-      if (req.method === "GET" && url.pathname === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" }).end(
-          JSON.stringify({ status: "ok" }),
-        );
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/mcp") {
-        await handlePost(req, res);
-        return;
-      }
-
-      if ((req.method === "GET" || req.method === "DELETE") && url.pathname === "/mcp") {
-        await handleSessionRequest(req, res);
-        return;
-      }
-
-      if (req.method === "POST") {
-        res.writeHead(404, { "Content-Type": "application/json" }).end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32601,
-              message: "Endpoint not found",
-            },
-            id: null,
-          }),
-        );
-        return;
-      }
-
-      res.writeHead(405, { Allow: "GET, POST, DELETE" }).end();
+      await messageSyncService.shutdown();
     } catch (error) {
-      console.error(`[http] unexpected error: ${error?.message ?? error}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" }).end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32603,
-              message: "Internal server error",
-            },
-            id: null,
-          }),
-        );
-      }
+      console.error(
+        `[shutdown] error while stopping message sync: ${error?.message ?? error}`,
+      );
     }
-  });
 
-  httpServer.listen(PORT, HOST, () => {
-    console.log(`[startup] MCP HTTP server listening on http://${HOST}:${PORT}/mcp`);
-  });
-
-  httpServer.on("error", (error) => {
-    console.error(`[http] server error: ${error.message}`);
-  });
-} else {
-  console.log("[startup] MCP disabled; running sync-only service.");
-}
-
-async function shutdown() {
-  if (shuttingDown) {
-    return;
-  }
-  shuttingDown = true;
-  console.log("[shutdown] received termination signal, closing resources...");
-  const closeTasks = [];
-  for (const record of sessions.values()) {
-    const task = closeSessionRecord(record, "shutdown");
-    if (task) {
-      closeTasks.push(task);
+    try {
+      await telegramClient.destroy();
+    } catch (error) {
+      console.error(
+        `[shutdown] error while closing Telegram client: ${error?.message ?? error}`,
+      );
     }
-  }
-  if (closeTasks.length) {
-    await Promise.allSettled(closeTasks);
-  }
-  if (httpServer) {
-    httpServer.closeAllConnections?.();
-    httpServer.close(() => {
-      console.log("[shutdown] HTTP server closed");
+
+    updateServiceState({
+      stoppedAt: new Date().toISOString(),
+      pid: null,
     });
   }
 
-  try {
-    await messageSyncService.shutdown();
-  } catch (error) {
-    console.error(`[shutdown] error while stopping message sync: ${error?.message ?? error}`);
-  }
+  const handleShutdownSignal = () => {
+    void shutdown().finally(() => process.exit(0));
+  };
 
-  try {
-    await telegramClient.destroy();
-  } catch (error) {
-    console.error(`[shutdown] error while closing Telegram client: ${error?.message ?? error}`);
-  }
-
-  updateServiceState({
-    stoppedAt: new Date().toISOString(),
-    pid: null,
-  });
+  process.prependListener("SIGINT", handleShutdownSignal);
+  process.prependListener("SIGTERM", handleShutdownSignal);
 }
-
-const handleShutdownSignal = () => {
-  void shutdown().finally(() => process.exit(0));
-};
-
-process.prependListener("SIGINT", handleShutdownSignal);
-process.prependListener("SIGTERM", handleShutdownSignal);

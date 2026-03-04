@@ -1,13 +1,14 @@
 {
-  "name": "@kfastov/tgcli",
-  "version": "2.0.8",
+  "name": "@tharindumendis/tgcli",
+  "version": "2.0.9",
   "type": "module",
-  "description": "Telegram CLI + MCP server powered by MTProto and the official MCP SDK",
+  "description": "Fork of tgcli — Telegram CLI + MCP server with native stdio transport for AI orchestrators",
   "main": "mcp-server.js",
   "scripts": {
     "client": "node mcp-client.js",
     "cli": "node cli.js",
     "start": "node mcp-server.js",
+    "mcp": "node mcp-stdio.js",
     "prepare": "npm run build",
     "build": "echo \"No build step required\"",
     "prepublishOnly": "npm test",
@@ -21,6 +22,7 @@
     "core",
     "message-sync-service.js",
     "mcp-server.js",
+    "mcp-stdio.js",
     "store-lock.js",
     "telegram-client.js",
     "scripts/install-cli.sh",
@@ -30,26 +32,28 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kfastov/telegram-mcp-server.git"
+    "url": "git+https://github.com/tharindumendis/telegram-mpc-server.git"
   },
   "keywords": [
     "telegram",
     "telegram-client",
     "mcp",
     "mcp-server",
+    "mcp-stdio",
+    "stdio",
     "mtproto",
-    "fastmcp",
+    "ai-orchestrator",
     "claude",
     "cursor",
     "ai-assistant",
     "ai-agent"
   ],
-  "author": "Konstantin Fastov",
+  "author": "Tharindu Mendis",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/kfastov/telegram-mcp-server/issues"
+    "url": "https://github.com/tharindumendis/telegram-mpc-server/issues"
   },
-  "homepage": "https://github.com/kfastov/telegram-mcp-server#readme",
+  "homepage": "https://github.com/tharindumendis/telegram-mpc-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@mtcute/core": "^0.27.8",

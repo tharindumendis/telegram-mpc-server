@@ -57,7 +57,7 @@ const LOG_LEVEL_NAMES = IS_TTY
 const LOG_TAG_COLORS = [6, 2, 3, 4, 5, 1].map((i) => `\x1B[3${i};1m`);
 const LOG_HANDLER = IS_TTY
   ? (color, level, tag, fmt, args) => {
-      console.log(
+      console.error(
         LOG_BASE_FORMAT + fmt,
         new Date().toISOString(),
         LOG_LEVEL_NAMES[level],
@@ -67,7 +67,7 @@ const LOG_HANDLER = IS_TTY
       );
     }
   : (color, level, tag, fmt, args) => {
-      console.log(
+      console.error(
         LOG_BASE_FORMAT + fmt,
         new Date().toISOString(),
         LOG_LEVEL_NAMES[level],
@@ -481,7 +481,7 @@ class TelegramClient {
   async login() {
     try {
       if (await this._isAuthorized()) {
-        console.log('Existing session is valid.');
+        console.error('Existing session is valid.');
         return true;
       }
 
@@ -498,7 +498,7 @@ class TelegramClient {
         },
       });
 
-      console.log('Logged in successfully!');
+      console.error('Logged in successfully!');
       return true;
     } catch (error) {
       console.error('Error during login:', error);
@@ -514,13 +514,13 @@ class TelegramClient {
   }
 
   async initializeDialogCache() {
-    console.log('Initializing dialog list...');
+    console.error('Initializing dialog list...');
     const loginSuccess = await this.login();
     if (!loginSuccess) {
       throw new Error('Failed to login to Telegram. Cannot proceed.');
     }
     await this.startUpdates();
-    console.log('Dialogs ready.');
+    console.error('Dialogs ready.');
     return true;
   }
 
